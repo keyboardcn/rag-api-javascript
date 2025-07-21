@@ -1,0 +1,39 @@
+{
+  "name": "youtube-rag-api-ts",
+  "version": "1.0.0",
+  "description": "YouTube RAG API using TypeScript, Node.js, Express, and Langchain.js",
+  "main": "dist/app.js",
+  "scripts": {
+    "start": "node dist/app.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
+    "build": "tsc",
+    "postinstall": "npm run build"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@huggingface/inference": "^4.5.3",
+    "@langchain/community": "^0.3.49",
+    "@langchain/core": "^0.3.66",
+    "@langchain/openai": "^0.6.2",
+    "@langchain/textsplitters": "^0.1.0",
+    "@types/sqlite3": "^3.1.11",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "faiss-node": "^0.5.1",
+    "hnswlib-node": "^3.0.0",
+    "langchain": "^0.3.30",
+    "sequelize": "^6.37.3",
+    "sequelize-typescript": "^2.1.6",
+    "sqlite3": "^5.1.7",
+    "youtube-transcript-api": "^3.0.6",
+    "youtubei.js": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.5"
+  }
+}
