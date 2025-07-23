@@ -1,21 +1,30 @@
 // src/ragService.ts
 import { YoutubeLoader } from "@langchain/community/document_loaders/web/youtube";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
-import { HuggingFaceInferenceEmbeddings } from "@langchain/community/embeddings/hf";
 import { FaissStore } from "@langchain/community/vectorstores/faiss";
-import { ChatOpenAI } from "@langchain/openai";
-import { ConversationalRetrievalQAChain } from "langchain/chains"; // Correct import for ConversationalRetrievalQAChain
+
+import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
+
 import { BufferMemory } from "langchain/memory";
 import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
 import { Document } from "@langchain/core/documents";
 import * as fs from 'fs';
 import * as path from 'path';
 import 'dotenv/config'; // Loads environment variables from .env file
-
+import { createHistoryAwareRetriever } from "langchain/chains/history_aware_retriever";
+import { createStuffDocumentsChain } from "langchain/chains/combine_documents";
+import { createRetrievalChain } from "langchain/chains/retrieval";
+import { RunnableLambda } from "@langchain/core/runnables";
 // Get OpenAI API key from environment variables
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 if (!OPENAI_API_KEY) {
     console.warn("Warning: OPENAI_API_KEY not found in environment variables. Please set it for LLM functionality.");
+}
+
+// Get Gemini API key from environment variables
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (!GEMINI_API_KEY) {
+    console.warn("Warning: GEMINI_API_KEY not found in environment variables. Please set it for Gemini functionality.");
 }
 
 // Define the directory to store FAISS indices
@@ -28,13 +37,9 @@ if (!fs.existsSync(FAISS_INDEX_DIR)) {
 const GLOBAL_FAISS_INDEX_PATH = path.join(FAISS_INDEX_DIR, "combined_videos.faiss");
 
 // Initialize the embedding model.
-// We use 'sentence-transformers/all-MiniLM-L6-v2' as a good general-purpose embedding model.
-// Note: HuggingFaceInferenceEmbeddings requires an API key or a running local inference server.
-// For simplicity, this example uses the default public inference API, which might have rate limits.
-// For production, consider setting process.env.HF_API_KEY or running a local inference server.
-const embeddings = new HuggingFaceInferenceEmbeddings({
-    model: "sentence-transformers/all-MiniLM-L6-v2",
-    apiKey: process.env.HF_API_KEY, // Optional: if you have a Hugging Face API key
+const embeddings = new GoogleGenerativeAIEmbeddings({
+    model: "embedding-001", // Specify the model
+    apiKey: GEMINI_API_KEY, // Use your API key
 });
 
 // Global variable to store the loaded combined FAISS vector store in memory.
@@ -70,6 +75,7 @@ export async function getYoutubeTranscript(url: string): Promise<string> {
             language: "en", // Specify language if needed
         });
         const docs = await loader.load();
+        console.log(`Loaded ${docs.length} documents from YouTube video: ${url}`);
         if (!docs || docs.length === 0) {
             return "";
         }
@@ -167,14 +173,14 @@ interface ChatMessage {
  * @returns A configured ConversationalRetrievalQAChain.
  * @throws {Error} If the global FAISS index is not loaded.
  */
-export async function getGlobalRagChain(chatHistory: ChatMessage[]): Promise<ConversationalRetrievalQAChain> {
+export async function getGlobalRagChain(chatHistory: ChatMessage[]): Promise<any> {
     const vectorStore = await loadGlobalFaissIndex(); // Ensure the index is loaded
 
     // Initialize the Language Model (LLM). We use ChatOpenAI.
-    const llm = new ChatOpenAI({
-        modelName: "gpt-3.5-turbo",
+    const llm = new ChatGoogleGenerativeAI({
+        model: "gemini-1.5-pro", // Specify the model
         temperature: 0.0,
-        openAIApiKey: OPENAI_API_KEY,
+        apiKey: GEMINI_API_KEY,
     });
 
     // Initialize BufferMemory to store chat history.
@@ -192,27 +198,52 @@ export async function getGlobalRagChain(chatHistory: ChatMessage[]): Promise<Con
         }
     }
 
-    // Define the prompt template for the conversational retrieval chain.
-    const qaPrompt = ChatPromptTemplate.fromMessages([
-        ["system", "You are an AI assistant specialized in answering questions about YouTube video transcripts. " +
-                   "Use the provided context and chat history to answer the user's question. " +
-                   "The context might come from various videos. If you don't know the answer, state that you don't know. " +
-                   "Be concise and helpful. You can also refer to the video URL if it's relevant to the answer."],
-        new MessagesPlaceholder("chat_history"), // Placeholder for the conversation history
-        ["human", "Context: {context}\nQuestion: {question}"], // Placeholder for retrieved context and current question
+    const historyAwarePrompt = ChatPromptTemplate.fromMessages([
+        new MessagesPlaceholder("chat_history"),
+        ["human", "{input}"],
+        ["human", "Given the above conversation, generate a search query to look up in order to get" + 
+            "information relevant to the conversation and the last question. " + 
+            "If the question is already a good search query, use it as is. " + 
+            "Do not include any conversational phrases or greetings. Just the search query."
+        ],
     ]);
+    const historyAwareRetrieverChain = await createHistoryAwareRetriever({
+        llm: llm,
+        retriever: vectorStore.asRetriever(),
+        rephrasePrompt: historyAwarePrompt,
+    });
+    const answerPrompt = ChatPromptTemplate.fromMessages([
+        ["system", "Answer the user's question based on the below context:\n\n{context}"],
+        new MessagesPlaceholder("chat_history"), // Placeholder for chat history
+        ["human", "{input}"],
+    ]);
+    console.log("Answer prompt defined.");
 
-    // Create a ConversationalRetrievalQAChain using the global FAISS store.
-    // This chain combines a retriever (for fetching relevant documents) and an LLM with memory.
-    // It takes the user's question, retrieves relevant documents, combines them with chat history,
-    // and then passes everything to the LLM to generate an answer.
-    const chain = ConversationalRetrievalQAChain.fromLLM(llm, vectorStore.asRetriever(), {
-        memory: memory,
-        returnSourceDocuments: true, // Set to true to return the source chunks
-        qaChainOptions: {
-            prompt: qaPrompt, // Pass the custom prompt to the QA chain
-        },
+    // 8. Create the stuff documents chain (combines retrieved docs with prompt)
+    const stuffDocumentsChain = await createStuffDocumentsChain({
+        llm: llm,
+        prompt: answerPrompt,
     });
 
-    return chain;
+  const chain = new RunnableLambda({
+    func: async (input: { input: string }) => {
+      const memoryVars = await memory.loadMemoryVariables({});
+      const chatHistory = memoryVars["chat_history"];
+
+      const docs = await historyAwareRetrieverChain.invoke({
+        input: input.input,
+        chat_history: chatHistory,
+      });
+
+      const result = await stuffDocumentsChain.invoke({
+        input: input.input,
+        context: docs,
+        chat_history: chatHistory,
+      });
+
+      return result;
+    },
+  });
+
+  return chain;
 }

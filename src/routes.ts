@@ -83,9 +83,9 @@ router.post('/chat', async (req: Request, res: Response) => {
     try {
         // Get the RAG chain using the global FAISS index and provided chat history
         const ragChain = await getGlobalRagChain(chat_history);
-
+        
         // Invoke the chain with the user's question
-        const response = await ragChain.call({ question: question });
+        const response = await ragChain.invoke({ input: question });
 
         const answer = response.text || "No answer could be generated.";
         const sourceDocuments = response.sourceDocuments || [];
